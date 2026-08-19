@@ -38,6 +38,70 @@ Dropforge is **concurrency-bound**: the hard part is 10k simultaneous claims on
 3. Make rejection the cheapest operation in the system — losers never touch
    the database.
 
-## 3. Context diagram — next lesson
-## 4. Service boundaries — next lesson
+## 3. Context diagram
+
+```mermaid
+flowchart TB
+    buyer([Buyer browser]) --> gw
+    admin([Admin]) --> gw
+    stripe([Stripe webhooks]) --> gw
+    sim([Drop simulator - load and chaos]) --> gw
+
+    subgraph edge [Edge]
+        gw[gateway<br/>auth, rate limit, routing]
+    end
+
+    gw --> catalog[catalog]
+    gw --> drop[drop<br/>schedule, waiting room, ticker]
+    gw --> order[order]
+    gw --> user[user/auth]
+    gw --> payment[payment]
+
+    drop --> inventory[inventory<br/>stock, holds]
+    order --> inventory
+    payment -->|Stripe API| stripeapi([Stripe])
+
+    subgraph events [Kafka]
+        bus[[drop.opened / order.placed / payment.succeeded / hold.expired]]
+    end
+
+    drop -. produce/consume .-> bus
+    order -. produce/consume .-> bus
+    inventory -. produce/consume .-> bus
+    payment -. produce/consume .-> bus
+    notification[notification] -. consume .-> bus
+
+    catalog --- pgc[(Postgres)]
+    inventory --- pgi[(Postgres)]
+    order --- pgo[(Postgres)]
+    payment --- pgp[(Postgres)]
+    user --- pgu[(Postgres)]
+    drop --- redis[(Redis<br/>queue, cache, locks)]
+```
+
+Every service also emits metrics/logs/traces to the observability stack
+(Prometheus, Loki, Tempo) — omitted above for readability.
+
+## 4. Service boundaries and their defense
+
+**Rule: a service boundary is defined by the data it owns and the invariant it
+protects — not by nouns in the problem statement.** Split where consistency
+requirements change: atomic-together stays together; eventual-consistency may
+be separated.
+
+| Service | Owns | Why it is a separate service |
+|---|---|---|
+| inventory | stock counts, purchase holds | protects THE invariant (no oversell); highest-contention atomic writes. Holds live here because a held unit IS stock state — splitting that across services splits the invariant |
+| order | order lifecycle records | write-light, history-heavy lifecycle tracking; no shared invariant with stock |
+| catalog | products, prices | read-heavy, cacheable, staleness-tolerant — opposite consistency needs from inventory |
+| drop | drop schedule, waiting-room queue, live ticker | traffic-shaping state (who may try, when), distinct from stock state (who succeeds) |
+| payment | charges, Stripe integration | quarantines an external dependency, its failure modes, and its secrets |
+| notification | delivery attempts | pure async consumer; nobody waits on it; failures isolate to a DLQ |
+| user | identities, credentials, roles | identity is its own domain and security boundary |
+| gateway | (no domain data) | edge concerns — authn enforcement, rate limiting, routing — implemented once, not seven times |
+
+Deliberately absent: a cart service. Flash drops have no cart — the purchase
+hold plays that role. A boundary drawn around a noun with no invariant behind
+it is how distributed monoliths start.
+
 ## 5. API contracts — next lesson
