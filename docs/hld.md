@@ -104,4 +104,48 @@ Deliberately absent: a cart service. Flash drops have no cart — the purchase
 hold plays that role. A boundary drawn around a noun with no invariant behind
 it is how distributed monoliths start.
 
-## 5. API contracts — next lesson
+## 5. API contracts
+
+Services never touch each other's databases; they talk only through these
+contracts, agreed here before implementation. All public routes go through the
+gateway and require a JWT (except signup/login and Stripe's webhook).
+
+### Public (buyer-facing)
+
+| Method & path | Owner | Purpose | Success | Notable errors |
+|---|---|---|---|---|
+| GET /products, /products/{id} | catalog | browse | 200 | — |
+| GET /drops/upcoming, /drops/{id} | drop | drop page + countdown | 200 (cacheable) | — |
+| POST /drops/{id}/queue | drop | join the waiting room | 201 {queueToken, position} | 409 not open, 429 rate-limited |
+| WS /drops/{id}/live | drop | position + stock ticker push | — | — |
+| POST /orders | order | create order from a hold | 201 {orderId} | 410 hold expired |
+| POST /orders/{id}/payment | payment | pay within the hold window | 201 {clientSecret} | 410 window closed |
+| POST /webhooks/stripe | payment | Stripe confirms/fails a charge | 200 | signature check |
+| POST /auth/signup, /auth/login | user | identity | 201/200 {tokens} | 401 |
+
+### Internal: the reservation contract (the system's heart)
+
+Called by drop when a buyer reaches the front of the queue. Inventory is the
+single source of truth for stock; only this endpoint can claim a unit.
+
+```
+POST inventory:/internal/holds
+{
+  "dropId":         "d-12",
+  "buyerId":        "u-4032",
+  "idempotencyKey": "q-8f3a..."   // the buyer's queue token
+}
+
+201 Created  { "holdId": "h-991", "expiresAt": "20:04:31Z" }   // 5-min hold
+409 Conflict { "reason": "SOLD_OUT" }                          // cheap rejection
+200 OK       { ...same hold... }   // duplicate of an already-processed key
+```
+
+Rules the contract encodes:
+- **Idempotent:** same idempotencyKey twice → the same hold once. Network
+  retries can never claim two units for one buyer.
+- **Atomic decrement:** grant the hold and decrease available stock in one
+  database action — the invariant lives or dies on this line.
+- **Expiry:** an unpaid hold lapses at expiresAt; the unit returns to the pool
+  and `hold.expired` is published so drop can admit the next buyer.
+- One hold per buyer per drop (fairness).
