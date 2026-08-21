@@ -3,3 +3,10 @@ CLAUDE.md
 PROGRESS.md
 docs/superpowers/
 VOCAB.md
+
+# Java
+target/
+*.class
+.idea/
+*.iml
+.DS_Store

@@ -1,0 +1,6 @@
+spring:
+  application:
+    name: catalog
+
+server:
+  port: 9081
